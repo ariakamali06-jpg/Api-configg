@@ -362,7 +362,7 @@ def create_config_from_panel(user_id: int, claim_num: int):
         logger.error(f"Error creating config from panel API: {e}")
     return None
 
-def create_vip_config(traffic_gb: float = 20.0, expire_days: int = 30):
+def create_vip_config(traffic_gb: float = 10.0, expire_days: int = 30):
     panel_url = get_setting("panel_url", PANEL_API_URL).strip().rstrip("/")
     panel_key = get_setting("panel_api_key", PANEL_API_KEY).strip()
     if not panel_url or not panel_key:
@@ -606,15 +606,15 @@ def handle_callback(cb):
         # Success deliver config
         success_text = (
             f"🎉 <b>تبریک! کانفیگ اختصاصی شما آماده شد:</b> ⚡️🎁\n\n"
-            f"👇 برای کپی تک‌ضرب، روی کادر زیر بزنید:\n"
-            f"```{config_data}```\n\n"
+            f"👇 برای کپی کامل، کادر زیر را لمس کنید:\n"
+            f"<pre><code>{config_data}</code></pre>\n\n"
             f"📱 <b>نرم‌افزارهای سازگار:</b>\n"
             f"• اندروید: V2rayNG / NekoBox\n"
             f"• آی‌او‌اس: Streisand / Foxray / V2Box\n"
             f"• ویندوز: v2rayN / Nekoray\n\n"
             f"🔥 <i>با دعوت ۵ نفر دیگر، مجدداً می‌توانید یک کانفیگ تازه و مجزا دریافت کنید!</i>"
         )
-        send_message(chat_id, success_text, parse_mode="Markdown", reply_markup=back_to_menu_keyboard())
+        send_message(chat_id, success_text, parse_mode="HTML", reply_markup=back_to_menu_keyboard())
 
     elif data == "help":
         help_text = (
@@ -730,7 +730,7 @@ def handle_admin_commands(msg):
 
     elif text.startswith("/vip"):
         parts = text.split()
-        gb = 20.0
+        gb = 10.0
         days = 30
         if len(parts) > 1:
             try:
@@ -748,14 +748,15 @@ def handle_admin_commands(msg):
         if vip_cfg:
             vip_text = (
                 f"👑 <b>کانفیگ اختصاصی VIP آماده شد!</b> ⚡️✨\n\n"
-                f"💾 حجم: <b>{gb} گیگابایت</b>\n"
+                f"💾 حجم سرور: <b>{gb} گیگابایت</b>\n"
                 f"⏳ مدت اعتبار: <b>{days} روز</b>\n"
-                f"🏷 تگ سرور: <code>⚡️「 Api-config-VIP 」👑</code>\n\n"
-                f"👇 برای کپی تک‌ضرب، روی کادر زیر بزنید:\n"
-                f"```{vip_cfg}```\n\n"
-                f"🔥 <i>سرور فوق‌سریع VIP با حداکثر اولویت پهنای باند و بدون محدودیت سرعت!</i>"
+                f"🏷 نام سرور در ویتوری: <code>⚡️「 Api-config-VIP 」👑</code>\n\n"
+                f"👇 برای کپی کامل کانفیگ، روی کادر زیر بزنید:\n"
+                f"<pre><code>{vip_cfg}</code></pre>\n\n"
+                f"📱 <b>نحوه افزودن به V2rayNG (ویتوری):</b>\n"
+                f"روی کادر بالا ضربه بزنید تا کل کانفیگ کپی شود، سپس در ویتوری علامت ➕ را زده و <b>Import config from Clipboard</b> را لمس کنید تا سرور با همین نام لود شود! 🔥"
             )
-            send_message(chat_id, vip_text, parse_mode="Markdown")
+            send_message(chat_id, vip_text, parse_mode="HTML")
         else:
             send_message(chat_id, f"❌ <b>خطا در ساخت کانفیگ VIP!</b>\n\nدلیل خطا: <code>{err}</code>")
         return True
