@@ -87,15 +87,6 @@ def init_db():
         )
     ''')
     cur.execute('''
-        CREATE TABLE IF NOT EXISTS config_pool (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            config TEXT UNIQUE,
-            is_used INTEGER DEFAULT 0,
-            used_by INTEGER,
-            used_at INTEGER
-        )
-    ''')
-    cur.execute('''
         CREATE TABLE IF NOT EXISTS issued_configs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
@@ -306,23 +297,6 @@ def register_user(user_id: int, first_name: str, username: str, referrer_id: int
     conn.close()
     return is_new, valid_referral
 
-def get_config_from_pool(user_id: int):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    now = int(time.time())
-    cur.execute("SELECT id, config FROM config_pool WHERE is_used = 0 LIMIT 1")
-    row = cur.fetchone()
-    if row:
-        cfg_id, config_str = row
-        cur.execute("UPDATE config_pool SET is_used = 1, used_by = ?, used_at = ? WHERE id = ?", (user_id, now, cfg_id))
-        cur.execute("UPDATE users SET claimed_count = claimed_count + 1 WHERE user_id = ?", (user_id,))
-        cur.execute("INSERT INTO issued_configs (user_id, config, issued_at) VALUES (?, ?, ?)", (user_id, config_str, now))
-        conn.commit()
-        conn.close()
-        return config_str
-    conn.close()
-    return None
-
 def create_config_from_panel(user_id: int, claim_num: int):
     panel_url = get_setting("panel_url", PANEL_API_URL).strip().rstrip("/")
     panel_key = get_setting("panel_api_key", PANEL_API_KEY).strip()
@@ -388,22 +362,57 @@ def create_config_from_panel(user_id: int, claim_num: int):
         logger.error(f"Error creating config from panel API: {e}")
     return None
 
-def add_configs_to_pool(configs: list):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    added = 0
-    for cfg in configs:
-        cfg = cfg.strip()
-        if not cfg or cfg.startswith("#"):
-            continue
-        try:
-            cur.execute("INSERT INTO config_pool (config, is_used) VALUES (?, 0)", (cfg,))
-            added += 1
-        except sqlite3.IntegrityError:
-            pass
-    conn.commit()
-    conn.close()
-    return added
+def create_vip_config(traffic_gb: float = 20.0, expire_days: int = 30):
+    panel_url = get_setting("panel_url", PANEL_API_URL).strip().rstrip("/")
+    panel_key = get_setting("panel_api_key", PANEL_API_KEY).strip()
+    if not panel_url or not panel_key:
+        return None, "تنظیمات پنل یا کلید API خالی است!"
+
+    # Auto-swap if accidentally inverted
+    if (panel_key.startswith("http://") or panel_key.startswith("https://")) and not (panel_url.startswith("http://") or panel_url.startswith("https://")):
+        panel_url, panel_key = panel_key, panel_url
+
+    if not (panel_url.startswith("http://") or panel_url.startswith("https://")):
+        return None, f"آدرس پنل نامعتبر است: {panel_url}"
+
+    if panel_url.endswith("/spider"):
+        panel_url = panel_url[:-7]
+    elif panel_url.endswith("/dashboard"):
+        panel_url = panel_url[:-10]
+
+    tag_name = "⚡️「 Api-config-VIP 」👑"
+    url = f"{panel_url}/api/users"
+    config_uuid = str(uuid.uuid4())
+    username = f"VIP_Admin_{int(time.time())}"
+    payload = {
+        "username": username,
+        "config_uuid": config_uuid,
+        "traffic_limit_gb": traffic_gb,
+        "expire_days": expire_days
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "X-API-Key": panel_key,
+        "User-Agent": "Mozilla/5.0"
+    }
+    try:
+        req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            if data.get("ok") and data.get("config"):
+                config_str = data["config"]
+                if "#" in config_str:
+                    config_str = config_str.split("#")[0] + "#" + tag_name
+                else:
+                    config_str = config_str + "#" + tag_name
+
+                logger.info(f"Generated VIP dedicated config: {tag_name}")
+                return config_str, None
+            else:
+                return None, f"پاسخ سرور پنل: {data}"
+    except Exception as e:
+        logger.error(f"Error creating VIP config: {e}")
+        return None, str(e)
 
 def get_stats():
     conn = sqlite3.connect(DB_PATH)
@@ -412,15 +421,12 @@ def get_stats():
     total_users = cur.fetchone()[0]
     cur.execute("SELECT count(*) FROM invites")
     total_invites = cur.fetchone()[0]
-    cur.execute("SELECT count(*) FROM config_pool WHERE is_used = 0")
-    available_configs = cur.fetchone()[0]
     cur.execute("SELECT count(*) FROM issued_configs")
     claimed_configs = cur.fetchone()[0]
     conn.close()
     return {
         "total_users": total_users,
         "total_invites": total_invites,
-        "available_configs": available_configs,
         "claimed_configs": claimed_configs
     }
 
@@ -580,34 +586,22 @@ def handle_callback(cb):
             send_message(chat_id, fail_text, reply_markup=back_to_menu_keyboard())
             return
 
-        # First attempt to issue a brand-new dedicated config from Panel API
+        # Issue dedicated live config from Panel API
         config_data = create_config_from_panel(user_id, claimed + 1)
-
-        # Fallback to config pool if panel API failed
-        if not config_data:
-            config_data = get_config_from_pool(user_id)
 
         if not config_data:
             empty_pool_text = (
                 f"🎉 <b>تبریک! شما ۵ نفر را دعوت کرده‌اید و واجد شرایط دریافت کانفیگ هستید.</b>\n\n"
                 f"⚠️ در حال حاضر سرور صدور آنی با ترافیک بالا مواجه شده است!\n"
-                f"درخواست شما ثبت شد و کانفیگ اختصاصی شما به زودی برایتان ارسال خواهد شد.\n\n"
-                f"صبور باشید، زحمات شما محفوظ است. ❤️"
+                f"درخواست شما ثبت شد؛ لطفاً دقایقی دیگر مجدداً دکمه «🎁 دریافت کانفیگ اختصاصی» را لمس کنید تا کانفیگ شما تحویل داده شود. ❤️"
             )
             send_message(chat_id, empty_pool_text, reply_markup=back_to_menu_keyboard())
             # Alert admin
             send_message(
                 ADMIN_USER_ID,
-                f"⚠️ <b>هشدار به ادمین:</b> کاربر <code>{user_id}</code> (@{from_user.get('username', 'ندارد')}) واجد شرایط دریافت کانفیگ است ولی صدور آنی انجام نشد و مخزن نیز خالی است!"
+                f"⚠️ <b>هشدار به ادمین:</b> کاربر <code>{user_id}</code> (@{from_user.get('username', 'ندارد')}) واجد شرایط دریافت کانفیگ است ولی صدور لایو از پنل با خطا مواجه شد!"
             )
             return
-
-        # Format config tag
-        tag_name = "⚡️「 Api-configg-Reward 」🎁"
-        if "#" in config_data:
-            config_data = config_data.split("#")[0] + "#" + tag_name
-        else:
-            config_data = config_data + "#" + tag_name
 
         # Success deliver config
         success_text = (
@@ -655,15 +649,13 @@ def handle_admin_commands(msg):
             f"👑 <b>پنل مدیریت ربات رفرال API CONFIG:</b>\n\n"
             f"👥 کل کاربران ثبت‌شده: <b>{stats['total_users']} نفر</b>\n"
             f"🔗 کل زیرمجموعه‌ها: <b>{stats['total_invites']} دعوت موفق</b>\n"
-            f"📦 موجودی مخزن رزرو دستی: <b>{stats['available_configs']} عدد</b>\n"
             f"🎁 کل کانفیگ‌های اهدا شده: <b>{stats['claimed_configs']} عدد</b>\n\n"
             f"🌐 <b>پنل متصل:</b> <code>{panel_url}</code>\n"
             f"📡 <b>وضعیت اتصال:</b> {status_str}\n\n"
             f"🛠 <b>دستورات مدیریتی:</b>\n"
+            f"• <code>/vip</code> : 👑 ساخت آنی کانفیگ ویژه VIP\n"
             f"• <code>/panel</code> : مشاهده تنظیمات پنل اسپایدر\n"
-            f"• <code>/setpanel لینک کلید</code> : تغییر پنل متصل\n"
-            f"• <code>/addconfig کانفیگ</code> : افزودن به مخزن دستی\n"
-            f"• <code>/pool</code> : موجودی مخزن دستی"
+            f"• <code>/setpanel لینک کلید</code> : تغییر پنل متصل"
         )
         send_message(chat_id, admin_text)
         return True
@@ -684,7 +676,8 @@ def handle_admin_commands(msg):
             f"⚙️ <b>مشخصات کانفیگ‌های خودکار:</b>\n"
             f"• حجم: <b>10 گیگابایت</b>\n"
             f"• انقضا: <b>30 روزه</b>\n"
-            f"• تگ: <code>⚡️「 Api-configg-Reward 」🎁</code>\n\n"
+            f"• تگ هدیه: <code>⚡️「 Api-configg-Reward 」🎁</code>\n"
+            f"• تگ ویژه VIP: <code>⚡️「 Api-config-VIP 」👑</code>\n\n"
             f"🔄 <b>تغییر پنل و کلید API:</b>\n"
             f"برای لینک کردن یک پنل جدید، کافیست دستور زیر را بفرستید:\n"
             f"<code>/setpanel آدرس_پنل کلید_api</code>\n\n"
@@ -735,19 +728,36 @@ def handle_admin_commands(msg):
             )
         return True
 
-    elif text.startswith("/addconfig"):
-        raw_cfgs = text.replace("/addconfig", "").strip()
-        if not raw_cfgs:
-            send_message(chat_id, "⚠️ لطفاً کانفیگ را بعد از دستور ارسال کنید:\n<code>/addconfig vless://...</code>")
-            return True
-        lines = [line.strip() for line in raw_cfgs.splitlines() if line.strip()]
-        added = add_configs_to_pool(lines)
-        send_message(chat_id, f"✅ تعداد <b>{added} کانفیگ</b> با موفقیت به مخزن اضافه شد!")
-        return True
+    elif text.startswith("/vip"):
+        parts = text.split()
+        gb = 20.0
+        days = 30
+        if len(parts) > 1:
+            try:
+                gb = float(parts[1])
+            except ValueError:
+                pass
+        if len(parts) > 2:
+            try:
+                days = int(parts[2])
+            except ValueError:
+                pass
 
-    elif text == "/pool":
-        stats = get_stats()
-        send_message(chat_id, f"📦 موجودی مخزن: <b>{stats['available_configs']} کانفیگ آماده</b>")
+        send_message(chat_id, f"⏳ در حال ساخت کانفیگ اختصاصی VIP ({gb}GB / {days} روزه)...")
+        vip_cfg, err = create_vip_config(traffic_gb=gb, expire_days=days)
+        if vip_cfg:
+            vip_text = (
+                f"👑 <b>کانفیگ اختصاصی VIP آماده شد!</b> ⚡️✨\n\n"
+                f"💾 حجم: <b>{gb} گیگابایت</b>\n"
+                f"⏳ مدت اعتبار: <b>{days} روز</b>\n"
+                f"🏷 تگ سرور: <code>⚡️「 Api-config-VIP 」👑</code>\n\n"
+                f"👇 برای کپی تک‌ضرب، روی کادر زیر بزنید:\n"
+                f"```{vip_cfg}```\n\n"
+                f"🔥 <i>سرور فوق‌سریع VIP با حداکثر اولویت پهنای باند و بدون محدودیت سرعت!</i>"
+            )
+            send_message(chat_id, vip_text, parse_mode="Markdown")
+        else:
+            send_message(chat_id, f"❌ <b>خطا در ساخت کانفیگ VIP!</b>\n\nدلیل خطا: <code>{err}</code>")
         return True
 
     return False
