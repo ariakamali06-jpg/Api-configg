@@ -54,8 +54,12 @@ DB_PATH = os.environ.get("DB_PATH") or (
 )
 
 # Panel API Configuration
-PANEL_API_URL = os.environ.get("PANEL_API_URL", "")
-PANEL_API_KEY = os.environ.get("PANEL_API_KEY", "")
+PANEL_API_URL = os.environ.get("PANEL_API_URL", "").strip()
+PANEL_API_KEY = os.environ.get("PANEL_API_KEY", "").strip()
+
+# Auto-correct if user accidentally swapped URL and API key in environment variables
+if (PANEL_API_KEY.startswith("http://") or PANEL_API_KEY.startswith("https://")) and not (PANEL_API_URL.startswith("http://") or PANEL_API_URL.startswith("https://")):
+    PANEL_API_URL, PANEL_API_KEY = PANEL_API_KEY, PANEL_API_KEY
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -143,18 +147,30 @@ def set_setting(key: str, value: str):
         logger.error(f"Error saving setting {key}: {e}")
 
 def test_panel_connection(url: str, api_key: str):
+    if not url:
+        return False, "", "آدرس پنل تنظیم نشده است"
+
     url = url.strip().rstrip("/")
+    api_key = api_key.strip()
+
+    # Auto-swap if arguments were passed in reverse order
+    if (api_key.startswith("http://") or api_key.startswith("https://")) and not (url.startswith("http://") or url.startswith("https://")):
+        url, api_key = api_key, url
+
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return False, url, f"آدرس نامعتبر است: باید با https:// شروع شود (دریافتی: {url[:20]}...)"
+
     if url.endswith("/spider"):
         url = url[:-7]
     elif url.endswith("/dashboard"):
         url = url[:-10]
 
     test_endpoint = f"{url}/api/inbounds"
-    req = urllib.request.Request(
-        test_endpoint,
-        headers={"X-API-Key": api_key, "User-Agent": "Mozilla/5.0"}
-    )
     try:
+        req = urllib.request.Request(
+            test_endpoint,
+            headers={"X-API-Key": api_key, "User-Agent": "Mozilla/5.0"}
+        )
         with urllib.request.urlopen(req, timeout=10) as resp:
             if resp.status == 200:
                 return True, url, "OK"
@@ -308,11 +324,25 @@ def get_config_from_pool(user_id: int):
     return None
 
 def create_config_from_panel(user_id: int, claim_num: int):
-    panel_url = get_setting("panel_url", PANEL_API_URL).rstrip("/")
-    panel_key = get_setting("panel_api_key", PANEL_API_KEY)
+    panel_url = get_setting("panel_url", PANEL_API_URL).strip().rstrip("/")
+    panel_key = get_setting("panel_api_key", PANEL_API_KEY).strip()
     if not panel_url or not panel_key:
         logger.warning("Panel URL or API Key is not configured.")
         return None
+
+    # Auto-swap if accidentally inverted
+    if (panel_key.startswith("http://") or panel_key.startswith("https://")) and not (panel_url.startswith("http://") or panel_url.startswith("https://")):
+        panel_url, panel_key = panel_key, panel_url
+
+    if not (panel_url.startswith("http://") or panel_url.startswith("https://")):
+        logger.error(f"Invalid panel_url: {panel_url}")
+        return None
+
+    if panel_url.endswith("/spider"):
+        panel_url = panel_url[:-7]
+    elif panel_url.endswith("/dashboard"):
+        panel_url = panel_url[:-10]
+
     traffic_gb = 10.0
     expire_days = 30
     config_name = "⚡️「 Api-configg-Reward 」🎁"
@@ -331,8 +361,8 @@ def create_config_from_panel(user_id: int, claim_num: int):
         "X-API-Key": panel_key,
         "User-Agent": "Mozilla/5.0"
     }
-    req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers, method="POST")
     try:
+        req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers, method="POST")
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode('utf-8'))
             if data.get("ok") and data.get("config"):
@@ -618,8 +648,8 @@ def handle_admin_commands(msg):
         stats = get_stats()
         panel_url = get_setting("panel_url", PANEL_API_URL or "تنظیم‌نشده")
         panel_key = get_setting("panel_api_key", PANEL_API_KEY or "")
-        ok, _, msg = test_panel_connection(panel_url, panel_key)
-        status_str = "🟢 متصل" if ok else f"🔴 قطعی ({msg})"
+        ok, _, conn_err = test_panel_connection(panel_url, panel_key)
+        status_str = "🟢 متصل" if ok else f"🔴 قطعی ({conn_err})"
 
         admin_text = (
             f"👑 <b>پنل مدیریت ربات رفرال API CONFIG:</b>\n\n"
@@ -642,8 +672,8 @@ def handle_admin_commands(msg):
         panel_url = get_setting("panel_url", PANEL_API_URL or "تنظیم‌نشده")
         panel_key = get_setting("panel_api_key", PANEL_API_KEY or "")
 
-        ok, _, msg = test_panel_connection(panel_url, panel_key)
-        status_text = "🟢 متصل و فعال" if ok else f"🔴 خطای اتصال ({msg})"
+        ok, _, conn_err = test_panel_connection(panel_url, panel_key)
+        status_text = "🟢 متصل و فعال" if ok else f"🔴 خطای اتصال ({conn_err})"
         masked_key = panel_key[:8] + "••••••••" if len(panel_key) > 8 else panel_key
 
         panel_text = (
@@ -676,8 +706,13 @@ def handle_admin_commands(msg):
             )
             return True
 
-        new_url = parts[1].strip()
-        new_key = parts[2].strip()
+        arg1 = parts[1].strip()
+        arg2 = parts[2].strip()
+        if (arg2.startswith("http://") or arg2.startswith("https://")) and not (arg1.startswith("http://") or arg1.startswith("https://")):
+            new_url, new_key = arg2, arg1
+        else:
+            new_url, new_key = arg1, arg2
+
         send_message(chat_id, "⏳ در حال بررسی و تست اتصال به پنل جدید...")
 
         ok, clean_url, err = test_panel_connection(new_url, new_key)
